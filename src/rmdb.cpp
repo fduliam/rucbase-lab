@@ -8,6 +8,7 @@ EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
+#include <cstdio>
 #include <netinet/in.h>
 #include <readline/history.h>
 #include <readline/readline.h>
@@ -116,9 +117,10 @@ void *client_handler(void *sock_fd) {
 
         // 开启事务，初始化系统所需的上下文信息（包括事务对象指针、锁管理器指针、日志管理器指针、存放结果的buffer、记录结果长度的变量）
         Context *context = new Context(lock_manager.get(), log_manager.get(), nullptr, data_send, &offset);
-        // Lab 3 need to remove transaction part
-        // Lab 4 need to restart transaction
-        // SetTransaction(&txn_id, context);
+        // 为这条 SQL 创建（或复用）事务对象：
+        //   如果客户端之前发过 BEGIN（显式事务），复用原事务；
+        //   否则创建一个隐式事务（txn_mode_=false），该语句执行完后 auto-commit。
+        SetTransaction(&txn_id, context);
 
         // 用于判断是否已经调用了yy_delete_buffer来删除buf
         bool finish_analyze = false;
@@ -147,6 +149,8 @@ void *client_handler(void *sock_fd) {
 
                     // 回滚事务
                     txn_manager->abort(context->txn_, log_manager.get());
+                    context->txn_ = nullptr;
+                    txn_id = INVALID_TXN_ID;
                     std::cout << e.GetInfo() << std::endl;
 
                     std::fstream outfile;
@@ -162,11 +166,21 @@ void *client_handler(void *sock_fd) {
                     data_send[e.get_msg_len() + 1] = '\0';
                     offset = e.get_msg_len() + 1;
 
-                    // 将报错信息写入output.txt
+                    // 诡错信息写入output.txt
                     std::fstream outfile;
                     outfile.open("output.txt",std::ios::out | std::ios::app);
                     outfile << "failure\n";
                     outfile.close();
+
+                    // 任意活跃事务（不论显式/隐式）出现 RMDBError 都需要 abort，
+                    // 否则会持有表锁直到 client 显式发 ABORT/COMMIT，极易把锁系统拖死。
+                    if (context->txn_ != nullptr &&
+                        context->txn_->get_state() != TransactionState::COMMITTED &&
+                        context->txn_->get_state() != TransactionState::ABORTED) {
+                        txn_manager->abort(context->txn_, log_manager.get());
+                        context->txn_ = nullptr;
+                        txn_id = INVALID_TXN_ID;
+                    }
                 }
             }
         }
@@ -179,11 +193,13 @@ void *client_handler(void *sock_fd) {
         if (write(fd, data_send, offset + 1) == -1) {
             break;
         }
-        // 如果是单条语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
-        // if(context->txn_->get_txn_mode() == false)
-        // {
-        //     txn_manager->commit(context->txn_, context->log_mgr_);
-        // }
+        // 如果是隐式单语句事务，执行完后自动提交
+        if (context->txn_ != nullptr && context->txn_->get_txn_mode() == false &&
+            context->txn_->get_state() != TransactionState::COMMITTED &&
+            context->txn_->get_state() != TransactionState::ABORTED) {
+            txn_manager->commit(context->txn_, context->log_mgr_);
+            txn_id = INVALID_TXN_ID;
+        }
     }
 
     // Clear

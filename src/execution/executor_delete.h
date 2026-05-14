@@ -37,6 +37,35 @@ class DeleteExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
+        // 表级 X 锁
+        if (context_ != nullptr && context_->lock_mgr_ != nullptr && context_->txn_ != nullptr) {
+            context_->lock_mgr_->lock_exclusive_on_table(context_->txn_, fh_->GetFd());
+        }
+        for (auto &rid : rids_) {
+            // 先获取记录数据（用于删除索引、并保存于 write_set 以供回滚）
+            auto rec = fh_->get_record(rid, context_);
+
+            // 记录 write 集
+            if (context_ != nullptr && context_->txn_ != nullptr) {
+                context_->txn_->append_write_record(
+                    new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
+            }
+            // 从索引中删除
+            for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                auto &index = tab_.indexes[i];
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                char *key = new char[index.col_tot_len];
+                int offset = 0;
+                for (size_t j = 0; j < (size_t)index.col_num; ++j) {
+                    memcpy(key + offset, rec->data + index.cols[j].offset, index.cols[j].len);
+                    offset += index.cols[j].len;
+                }
+                ih->delete_entry(key, context_->txn_);
+                delete[] key;
+            }
+            // 从记录文件中删除
+            fh_->delete_record(rid, context_);
+        }
         return nullptr;
     }
 

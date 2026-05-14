@@ -50,7 +50,23 @@ class SeqScanExecutor : public AbstractExecutor {
      *
      */
     void beginTuple() override {
-        
+        // 表级 S 锁：纯读路径加共享锁，让多个只读事务可以并发，
+        // 同时与并发的 UPDATE/DELETE/INSERT（X 锁）保持互斥；
+        // 若同一事务后续走到 update/delete/insert，会触发 S→X 升级，
+        // lock_manager 已对升级冲突走死锁预防（abort）。
+        if (context_ != nullptr && context_->lock_mgr_ != nullptr && context_->txn_ != nullptr) {
+            context_->lock_mgr_->lock_shared_on_table(context_->txn_, fh_->GetFd());
+        }
+        scan_ = std::make_unique<RmScan>(fh_);
+        // 找到第一个满足谓词条件的元组
+        while (!scan_->is_end()) {
+            rid_ = scan_->rid();
+            auto rec = fh_->get_record(rid_, context_);
+            if (eval_conds(cols_, fed_conds_, rec.get())) {
+                break;
+            }
+            scan_->next();
+        }
     }
 
     /**
@@ -58,7 +74,14 @@ class SeqScanExecutor : public AbstractExecutor {
      *
      */
     void nextTuple() override {
-        
+        // 从当前scan_指向的记录开始迭代扫描
+        for (scan_->next(); !scan_->is_end(); scan_->next()) {
+            rid_ = scan_->rid();
+            auto rec = fh_->get_record(rid_, context_);
+            if (eval_conds(cols_, fed_conds_, rec.get())) {
+                break;
+            }
+        }
     }
 
     /**
@@ -67,7 +90,83 @@ class SeqScanExecutor : public AbstractExecutor {
      * @return std::unique_ptr<RmRecord>
      */
     std::unique_ptr<RmRecord> Next() override {
-        return nullptr;
+        return fh_->get_record(rid_, context_);
+    }
+
+    bool is_end() const override { return scan_->is_end(); }
+
+    size_t tupleLen() const override { return len_; }
+
+    const std::vector<ColMeta> &cols() const override { return cols_; }
+
+    // 判断单个条件是否满足
+    bool eval_cond(const std::vector<ColMeta> &rec_cols, const Condition &cond, const RmRecord *rec) {
+        auto lhs_col = get_col(rec_cols, cond.lhs_col);
+        char *lhs_data = rec->data + lhs_col->offset;
+        ColType lhs_type = lhs_col->type;
+        int lhs_len = lhs_col->len;
+
+        char *rhs_data;
+        ColType rhs_type;
+        int rhs_len;
+        // 如果右边是值
+        if (cond.is_rhs_val) {
+            rhs_type = cond.rhs_val.type;
+            rhs_len = lhs_len;  // 用左边的长度
+            // 需要获取原始数据
+            rhs_data = cond.rhs_val.raw->data;
+        } else {
+            // 右边是列
+            auto rhs_col = get_col(rec_cols, cond.rhs_col);
+            rhs_data = rec->data + rhs_col->offset;
+            rhs_type = rhs_col->type;
+            rhs_len = rhs_col->len;
+        }
+
+        // 比较
+        int cmp = 0;
+        if (lhs_type == TYPE_INT && rhs_type == TYPE_INT) {
+            int lhs_val = *(int *)lhs_data;
+            int rhs_val = *(int *)rhs_data;
+            cmp = (lhs_val > rhs_val) - (lhs_val < rhs_val);
+        } else if (lhs_type == TYPE_FLOAT && rhs_type == TYPE_FLOAT) {
+            float lhs_val = *(float *)lhs_data;
+            float rhs_val = *(float *)rhs_data;
+            cmp = (lhs_val > rhs_val) - (lhs_val < rhs_val);
+        } else if (lhs_type == TYPE_STRING && rhs_type == TYPE_STRING) {
+            int min_len = std::min(lhs_len, rhs_len);
+            cmp = memcmp(lhs_data, rhs_data, min_len);
+        } else if (lhs_type == TYPE_INT && rhs_type == TYPE_FLOAT) {
+            float lhs_val = (float)(*(int *)lhs_data);
+            float rhs_val = *(float *)rhs_data;
+            cmp = (lhs_val > rhs_val) - (lhs_val < rhs_val);
+        } else if (lhs_type == TYPE_FLOAT && rhs_type == TYPE_INT) {
+            float lhs_val = *(float *)lhs_data;
+            float rhs_val = (float)(*(int *)rhs_data);
+            cmp = (lhs_val > rhs_val) - (lhs_val < rhs_val);
+        } else {
+            throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
+        }
+
+        switch (cond.op) {
+            case OP_EQ: return cmp == 0;
+            case OP_NE: return cmp != 0;
+            case OP_LT: return cmp < 0;
+            case OP_GT: return cmp > 0;
+            case OP_LE: return cmp <= 0;
+            case OP_GE: return cmp >= 0;
+            default: throw InternalError("Unexpected op type");
+        }
+    }
+
+    // 判断所有条件是否满足（AND）
+    bool eval_conds(const std::vector<ColMeta> &rec_cols, const std::vector<Condition> &conds, const RmRecord *rec) {
+        for (auto &cond : conds) {
+            if (!eval_cond(rec_cols, cond, rec)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     Rid &rid() override { return rid_; }

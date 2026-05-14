@@ -21,13 +21,17 @@ LRUReplacer::~LRUReplacer() = default;
  */
 bool LRUReplacer::victim(frame_id_t* frame_id) {
     // C++17 std::scoped_lock
-    // 它能够避免死锁发生，其构造函数能够自动进行上锁操作，析构函数会对互斥量进行解锁操作，保证线程安全。
-    std::scoped_lock lock{latch_};  //  如果编译报错可以替换成其他lock
+    std::scoped_lock lock{latch_};
 
-    // Todo:
-    //  利用lru_replacer中的LRUlist_,LRUHash_实现LRU策略
-    //  选择合适的frame指定为淘汰页面,赋值给*frame_id
-
+    // 利用lru_replacer中的LRUlist_,LRUHash_实现LRU策略
+    // 选择合适的frame指定为淘汰页面,赋值给*frame_id
+    if (LRUlist_.empty()) {
+        return false;
+    }
+    // LRU策略：淘汰最久未使用的页面，即链表尾部的元素
+    *frame_id = LRUlist_.back();
+    LRUhash_.erase(*frame_id);
+    LRUlist_.pop_back();
     return true;
 }
 
@@ -37,9 +41,13 @@ bool LRUReplacer::victim(frame_id_t* frame_id) {
  */
 void LRUReplacer::pin(frame_id_t frame_id) {
     std::scoped_lock lock{latch_};
-    // Todo:
     // 固定指定id的frame
     // 在数据结构中移除该frame
+    auto it = LRUhash_.find(frame_id);
+    if (it != LRUhash_.end()) {
+        LRUlist_.erase(it->second);
+        LRUhash_.erase(it);
+    }
 }
 
 /**
@@ -47,9 +55,19 @@ void LRUReplacer::pin(frame_id_t frame_id) {
  * @param {frame_id_t} frame_id 取消固定的frame的id
  */
 void LRUReplacer::unpin(frame_id_t frame_id) {
-    // Todo:
-    //  支持并发锁
-    //  选择一个frame取消固定
+    // 支持并发锁
+    std::scoped_lock lock{latch_};
+    // 如果已经在LRU列表中，不重复添加
+    if (LRUhash_.count(frame_id)) {
+        return;
+    }
+    // 如果已经达到最大容量，不添加
+    if (LRUlist_.size() >= max_size_) {
+        return;
+    }
+    // 选择一个frame取消固定，添加到LRU列表头部
+    LRUlist_.push_front(frame_id);
+    LRUhash_[frame_id] = LRUlist_.begin();
 }
 
 /**

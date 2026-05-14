@@ -322,6 +322,16 @@ setClause:
     {
         $$ = std::make_shared<SetClause>($1, $3);
     }
+    ;    ;    |   colName '=' colName '+' value
+    {
+        // col = col + value (TPC-C 里常见)
+        $$ = std::make_shared<SetClause>($1, $5, SV_SET_PLUS);
+    }
+    |   colName '=' colName '-' value
+    {
+        // col = col - value
+        $$ = std::make_shared<SetClause>($1, $5, SV_SET_MINUS);
+    }
     ;
 
 selector:

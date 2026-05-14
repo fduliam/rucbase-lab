@@ -141,12 +141,23 @@ struct Col : public Expr {
             tab_name(std::move(tab_name_)), col_name(std::move(col_name_)) {}
 };
 
+// 增量更新算子：col = col + delta / col = col - delta
+enum SetOp {
+    SV_SET_ASSIGN = 0,  // col = value
+    SV_SET_PLUS,        // col = col + value
+    SV_SET_MINUS        // col = col - value
+};
+
 struct SetClause : public TreeNode {
     std::string col_name;
     std::shared_ptr<Value> val;
+    SetOp op;  // 默认为 ASSIGN，TPC-C 中常用 PLUS/MINUS
 
     SetClause(std::string col_name_, std::shared_ptr<Value> val_) :
-            col_name(std::move(col_name_)), val(std::move(val_)) {}
+            col_name(std::move(col_name_)), val(std::move(val_)), op(SV_SET_ASSIGN) {}
+
+    SetClause(std::string col_name_, std::shared_ptr<Value> val_, SetOp op_) :
+            col_name(std::move(col_name_)), val(std::move(val_)), op(op_) {}
 };
 
 struct BinaryExpr : public TreeNode {

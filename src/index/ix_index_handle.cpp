@@ -377,20 +377,59 @@ Rid IxIndexHandle::get_rid(const Iid &iid) const {
  * @note 上层传入的key本来是int类型，通过(const char *)&key进行了转换
  * 可用*(int *)key转换回去
  */
+/**
+ * @brief FindLeafPage + lower_bound
+ *
+ * @param key 全量索引列拼接后的复合 key（长度为 file_hdr_->col_tot_len_）
+ * @return Iid 指向第一个 >= key 的叶子节点中的位置；若不存在则返回 leaf_end()
+ */
 Iid IxIndexHandle::lower_bound(const char *key) {
-
-    return Iid{-1, -1};
+    if (is_empty()) return leaf_end();
+    auto [leaf, _root_latched] = find_leaf_page(key, Operation::FIND, nullptr);
+    int idx = leaf->lower_bound(key);
+    Iid iid;
+    if (idx >= leaf->get_size()) {
+        // 当前叶子所有 key 都小于目标：跳到下一个叶子的首位
+        page_id_t next = leaf->get_next_leaf();
+        buffer_pool_manager_->unpin_page(leaf->get_page_id(), false);
+        delete leaf;
+        if (next == IX_NO_PAGE || next == IX_LEAF_HEADER_PAGE) {
+            return leaf_end();
+        }
+        iid = {.page_no = next, .slot_no = 0};
+        return iid;
+    }
+    iid = {.page_no = leaf->get_page_no(), .slot_no = idx};
+    buffer_pool_manager_->unpin_page(leaf->get_page_id(), false);
+    delete leaf;
+    return iid;
 }
 
 /**
  * @brief FindLeafPage + upper_bound
  *
- * @param key
- * @return Iid
+ * @param key 全量复合 key
+ * @return Iid 指向第一个 > key 的位置。
  */
 Iid IxIndexHandle::upper_bound(const char *key) {
-    
-    return Iid{-1, -1};
+    if (is_empty()) return leaf_end();
+    auto [leaf, _root_latched] = find_leaf_page(key, Operation::FIND, nullptr);
+    int idx = leaf->upper_bound(key);
+    Iid iid;
+    if (idx >= leaf->get_size()) {
+        page_id_t next = leaf->get_next_leaf();
+        buffer_pool_manager_->unpin_page(leaf->get_page_id(), false);
+        delete leaf;
+        if (next == IX_NO_PAGE || next == IX_LEAF_HEADER_PAGE) {
+            return leaf_end();
+        }
+        iid = {.page_no = next, .slot_no = 0};
+        return iid;
+    }
+    iid = {.page_no = leaf->get_page_no(), .slot_no = idx};
+    buffer_pool_manager_->unpin_page(leaf->get_page_id(), false);
+    delete leaf;
+    return iid;
 }
 
 /**

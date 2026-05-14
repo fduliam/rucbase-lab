@@ -38,6 +38,10 @@ class InsertExecutor : public AbstractExecutor {
     };
 
     std::unique_ptr<RmRecord> Next() override {
+        // 表级 X 锁
+        if (context_ != nullptr && context_->lock_mgr_ != nullptr && context_->txn_ != nullptr) {
+            context_->lock_mgr_->lock_exclusive_on_table(context_->txn_, fh_->GetFd());
+        }
         // Make record buffer
         RmRecord rec(fh_->get_file_hdr().record_size);
         for (size_t i = 0; i < values_.size(); i++) {
@@ -51,6 +55,12 @@ class InsertExecutor : public AbstractExecutor {
         }
         // Insert into record file
         rid_ = fh_->insert_record(rec.data, context_);
+
+        // 记录 write 集，供 abort 时列反向回滚
+        if (context_ != nullptr && context_->txn_ != nullptr) {
+            context_->txn_->append_write_record(
+                new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_));
+        }
         
         // Insert into index
         for(size_t i = 0; i < tab_.indexes.size(); ++i) {
