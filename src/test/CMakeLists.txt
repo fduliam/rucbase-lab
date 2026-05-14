@@ -34,3 +34,5 @@ add_executable(regress_test regress/regress_test_main.cpp regress/regress_test.c
 # concurrency test
 add_executable(concurrency_test concurrency/concurrency_test_main.cpp concurrency/concurrency_test.cpp regress/regress_test.cpp)
 
+# tpc-c benchmark
+add_subdirectory(tpcc)
